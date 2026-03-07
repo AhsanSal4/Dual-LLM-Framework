@@ -1,0 +1,22 @@
+# Core
+pandas>=2.0.0
+streamlit>=1.30.0
+streamlit-autorefresh>=1.0.1
+
+# LangChain stack
+langchain>=0.3.0
+langchain-core>=0.3.0
+langchain-community>=0.3.0
+langchain-google-genai>=2.0.0
+google-generativeai>=0.8.0
+
+# Vector DB + Embeddings
+chromadb>=0.5.0
+sentence-transformers>=3.0.0
+
+# PyTorch (CPU-only wheel — avoids 2 GB CUDA download on Streamlit Cloud)
+--extra-index-url https://download.pytorch.org/whl/cpu
+torch>=2.0.0
+
+# Packet capture (live mode only; import is wrapped in try/except for cloud)
+scapy>=2.5.0

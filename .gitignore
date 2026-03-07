@@ -1,0 +1,45 @@
+# Byte-compiled / optimized / DLL files
+__pycache__/
+*.py[cod]
+*$py.class
+
+# Caches and logs
+*.log
+*.cache
+
+# Environment variables
+.env
+.env.*
+
+# Streamlit secrets — NEVER commit the real key
+.streamlit/secrets.toml
+
+# Keep the example template and config
+!.streamlit/secrets.toml.example
+!.streamlit/config.toml
+
+# Data files
+*.tsv
+*.xlsx
+*.xls
+*.db
+*.sqlite3
+*.bin
+*.pickle
+*.pkl
+*.h5
+*.hdf5
+
+# Allow specific dataset files
+!NUSW-NB15_features1.csv
+!UNSW_NB15_attack_binary_bits.csv
+
+# Chroma vector database
+chroma_db/
+
+# Jupyter Notebook checkpoints
+.ipynb_checkpoints/
+
+# OS files
+.DS_Store
+Thumbs.db
