@@ -10,8 +10,11 @@ langchain-community>=0.3.0
 langchain-google-genai>=2.0.0
 google-generativeai>=0.8.0
 
-# Vector DB + Embeddings
-chromadb>=0.5.0
+# pydantic v2 required by chromadb 0.6+
+pydantic>=2.0.0
+
+# Vector DB — 0.6.0+ uses pydantic v2 natively (no v1 compat, works on Python 3.14)
+chromadb>=0.6.0
 sentence-transformers>=3.0.0
 
 # PyTorch CPU-only
