@@ -19,12 +19,11 @@ import gc
 from datetime import datetime
 
 # ── LangChain / Gemini ────────────────────────────────────────────────────────
-from langchain_community.embeddings import HuggingFaceEmbeddings
-from langchain_community.vectorstores import Chroma
+from langchain_huggingface import HuggingFaceEmbeddings
+from langchain_community.vectorstores import FAISS
 from langchain_google_genai import ChatGoogleGenerativeAI
 from langchain_core.prompts import ChatPromptTemplate
 from langchain_core.output_parsers import StrOutputParser
-import google.generativeai as genai
 
 # ── Local IDS modules ─────────────────────────────────────────────────────────
 try:
@@ -73,13 +72,11 @@ if not google_api_key or google_api_key == "your-gemini-api-key-here":
     st.caption("Get a free key at [aistudio.google.com](https://aistudio.google.com) → Get API Key → Create API key")
     if user_key:
         os.environ["GOOGLE_API_KEY"] = user_key
-        genai.configure(api_key=user_key)
         st.rerun()
     else:
         st.stop()
 else:
     os.environ["GOOGLE_API_KEY"] = google_api_key
-    genai.configure(api_key=google_api_key)
 
 # ═════════════════════════════════════════════════════════════════════════════
 # SESSION STATE DEFAULTS
@@ -115,15 +112,15 @@ def load_forensic_chain():
     automatically from the committed CSV (takes ~2 min on first run only).
     Returns (retriever, llm, prompt, error_message).
     """
-    persist_dir = "./chroma_db"
-    if not os.path.exists(persist_dir):
+    persist_dir = "./faiss_db"
+    if not os.path.exists(os.path.join(persist_dir, "index.faiss")):
         # Auto-build — happens on first deploy or fresh clone (Design Doc §1.4)
         try:
             from build_chroma_db import build_and_persist_chroma_db
             build_and_persist_chroma_db()
         except Exception as build_err:
             return None, None, None, (
-                f"Failed to auto-build ChromaDB: {build_err}. "
+                f"Failed to auto-build FAISS index: {build_err}. "
                 "Run `python build_chroma_db.py` manually in the project folder."
             )
 
@@ -136,9 +133,10 @@ def load_forensic_chain():
     torch.cuda.empty_cache()
     gc.collect()
 
-    docsearch = Chroma(
-        persist_directory=persist_dir,
-        embedding_function=embeddings,
+    docsearch = FAISS.load_local(
+        persist_dir,
+        embeddings,
+        allow_dangerous_deserialization=True,
     )
     retriever = docsearch.as_retriever(search_kwargs={"k": 15})
 

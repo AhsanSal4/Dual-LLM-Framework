@@ -36,6 +36,7 @@ __pycache__/
 
 # Chroma vector database
 chroma_db/
+faiss_db/
 
 # Jupyter Notebook checkpoints
 .ipynb_checkpoints/

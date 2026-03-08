@@ -4,27 +4,27 @@ Offline script — Module 2: Forensic Engine Indexer
 
 Reads the UNSW-NB15 dataset, converts each flow row into a natural-language
 text document, embeds it with all-MiniLM-L6-v2, and stores the vectors plus
-metadata (attack_cat, proto, label) in a persisted ChromaDB collection.
+metadata (attack_cat, proto, label) in a persisted FAISS index.
 
 Run once before launching the Streamlit app:
     python build_chroma_db.py
 
-Design Document §1.4: ChromaDB, all-MiniLM-L6-v2 (384-dim), sub-second retrieval
-SRS FR-4: UNSW-NB15 → text template → HuggingFace embeddings → ChromaDB
+Design Document §1.4: FAISS, all-MiniLM-L6-v2 (384-dim), sub-second retrieval
+SRS FR-4: UNSW-NB15 → text template → HuggingFace embeddings → FAISS
 """
 
 import pandas as pd
 import os
 import torch
 import gc
-from langchain_community.embeddings import HuggingFaceEmbeddings
-from langchain_community.vectorstores import Chroma
+from langchain_huggingface import HuggingFaceEmbeddings
+from langchain_community.vectorstores import FAISS
 from langchain_core.documents import Document
 
 # --- Configuration ---
 DATA_FILE = 'UNSW_NB15_attack_binary_bits.csv'
 FEATURES_FILE = 'NUSW-NB15_features1.csv'
-PERSIST_DIRECTORY = "./chroma_db"
+PERSIST_DIRECTORY = "./faiss_db"
 SAMPLE_SIZE = 10000
 EMBEDDING_MODEL_NAME = "sentence-transformers/all-MiniLM-L6-v2"
 
@@ -71,7 +71,7 @@ feature_descriptions_map = {
     'b0': 'Binary representation bit 0 of attack category'
 }
 
-# Columns stored as ChromaDB metadata (not embedded into text body)
+# Columns stored as FAISS document metadata (not embedded into text body)
 _METADATA_COLS = {'attack_cat', 'label', 'b3', 'b2', 'b1', 'b0'}
 
 
@@ -102,8 +102,8 @@ def row_to_metadata(row) -> dict:
     }
 
 def build_and_persist_chroma_db():
-    print(f"--- Starting Chroma DB build process ({SAMPLE_SIZE} records) ---")
-    print("SRS FR-4: UNSW-NB15 → text template → HuggingFace embeddings → ChromaDB")
+    print(f"--- Starting FAISS index build process ({SAMPLE_SIZE} records) ---")
+    print("SRS FR-4: UNSW-NB15 → text template → HuggingFace embeddings → FAISS")
 
     # Load data
     try:
@@ -141,15 +141,14 @@ def build_and_persist_chroma_db():
     # Ensure persist directory exists
     os.makedirs(PERSIST_DIRECTORY, exist_ok=True)
 
-    # Build and persist ChromaDB
-    print(f"Building ChromaDB at '{PERSIST_DIRECTORY}' ...")
-    docsearch = Chroma.from_documents(
+    # Build and persist FAISS index
+    print(f"Building FAISS index at '{PERSIST_DIRECTORY}' ...")
+    docsearch = FAISS.from_documents(
         documents=documents,
         embedding=embedding_model,
-        persist_directory=PERSIST_DIRECTORY,
     )
-    docsearch.persist()
-    print(f"ChromaDB built and persisted — {len(documents)} vectors stored.")
+    docsearch.save_local(PERSIST_DIRECTORY)
+    print(f"FAISS index built and saved — {len(documents)} vectors stored.")
     print("Attack categories indexed:",
           df_sample['attack_cat'].value_counts().to_dict() if 'attack_cat' in df_sample.columns else 'N/A')
 

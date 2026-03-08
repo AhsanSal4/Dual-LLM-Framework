@@ -8,14 +8,15 @@ langchain>=0.3.0
 langchain-core>=0.3.0
 langchain-community>=0.3.0
 langchain-google-genai>=2.0.0
-google-generativeai>=0.8.0
+google-genai>=1.0.0
 
 # pydantic v2 required by chromadb 0.6+
 pydantic>=2.0.0
 
-# Vector DB — 0.6.0+ uses pydantic v2 natively (no v1 compat, works on Python 3.14)
-chromadb>=0.6.0
+# Vector DB — FAISS has no pydantic dependency, works on all Python versions
+faiss-cpu>=1.7.0
 sentence-transformers>=3.0.0
+langchain-huggingface>=0.1.0
 
 # PyTorch CPU-only
 torch
