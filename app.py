@@ -93,11 +93,43 @@ _defaults = {
     "llm_count":      0,
     "proto_counts":   {},
     "verdict_counts": {},
-    "llm_session_cap": 20,   # max LLM calls per session to protect free-tier daily quota
+    "llm_session_cap": 20,
+    # Rate-limit state — stored in session_state so it survives across
+    # Streamlit reruns and is not lost when Cloud rotates worker processes
+    "_rl_last_call":    0.0,   # epoch seconds of last successful API call
+    "_rl_backoff_until": 0.0,  # epoch seconds when backoff expires
 }
 for _k, _v in _defaults.items():
     if _k not in st.session_state:
         st.session_state[_k] = _v
+
+_RL_MIN_INTERVAL = 8.0   # seconds between calls (~7.5 RPM, 50% under 15 RPM limit)
+
+
+def _rl_acquire() -> float | None:
+    """Try to acquire an LLM call slot using session-state rate tracking.
+    Returns remaining backoff seconds if blocked, None if slot acquired."""
+    import time as _time
+    now = _time.time()
+    remaining = st.session_state["_rl_backoff_until"] - now
+    if remaining > 0:
+        return remaining
+    since_last = now - st.session_state["_rl_last_call"]
+    if since_last < _RL_MIN_INTERVAL:
+        _time.sleep(_RL_MIN_INTERVAL - since_last)
+    st.session_state["_rl_last_call"] = _time.time()
+    return None
+
+
+def _rl_record_429(err_str: str) -> float:
+    """Parse a 429 error, set session-state backoff, return retry delay."""
+    import re as _re, time as _time
+    retry_delay = 90.0
+    m = _re.search(r'retry[^0-9]+([0-9]+)', err_str, _re.IGNORECASE)
+    if m:
+        retry_delay = max(90.0, float(m.group(1)) + 10)
+    st.session_state["_rl_backoff_until"] = _time.time() + retry_delay
+    return retry_delay
 
 # ═════════════════════════════════════════════════════════════════════════════
 # CACHED RAG CHAIN  (Module 2 — Forensic Engine)
@@ -176,14 +208,13 @@ relationships observed across the retrieved records.
 def _run_forensic_query(retriever, llm, prompt, question: str) -> dict:
     """
     Execute a forensic RAG query using LCEL.
-    Shares the same rate-limit state as the Live Dashboard via llm_engine.
+    Rate-limits via st.session_state so state survives across reruns/workers.
     Returns {"result": str, "source_documents": list, "error": str|None}
     """
-    # Check / acquire shared rate-limit slot before touching the API
-    backoff_remaining = le.acquire_call_slot()
+    backoff_remaining = _rl_acquire()
     if backoff_remaining is not None:
         friendly = (
-            f"\u26a0\ufe0f **API rate limit active — {backoff_remaining:.0f}s remaining.**\n\n"
+            f"\u26a0\ufe0f **API rate limit active \u2014 {backoff_remaining:.0f}s remaining.**\n\n"
             "The Gemini free tier allows **15 requests/minute**. "
             "Both the Live Dashboard and Forensic Console share this limit.\n\n"
             f"**Retry in {backoff_remaining:.0f}s**, or stop the Live Dashboard capture "
@@ -200,7 +231,7 @@ def _run_forensic_query(retriever, llm, prompt, question: str) -> dict:
     except Exception as exc:
         err = str(exc)
         if "429" in err or "RESOURCE_EXHAUSTED" in err:
-            wait = le.record_429(err)
+            wait = _rl_record_429(err)
             friendly = (
                 f"\u26a0\ufe0f **API rate limit hit (429).**\n\n"
                 f"The Gemini free tier allows **15 requests/minute**. "
@@ -363,29 +394,37 @@ with tab1:
                     log_entry["method"]  = "Heuristic"
                     log_entry["details"] += f" | LLM skipped (session cap {cap} reached)"
                 else:
-                    flow["heuristic_details"] = triage["details"]
-                    try:
-                        llm_result = le.analyze_flow_with_llm(flow)
-                        classification = llm_result.get("classification", "")
-                        explanation    = llm_result.get("explanation", "")
-                        # Detect internal LLM failure (returned as explanation text)
-                        if "LLM call failed" in explanation or not classification or classification == "Unknown":
+                    backoff_rem = _rl_acquire()
+                    if backoff_rem is not None:
+                        log_entry["method"]  = "Heuristic"
+                        log_entry["details"] += f" | LLM skipped (rate limit backoff {backoff_rem:.0f}s)"
+                    else:
+                        flow["heuristic_details"] = triage["details"]
+                        try:
+                            llm_result = le.analyze_flow_with_llm(flow)
+                            classification = llm_result.get("classification", "")
+                            explanation    = llm_result.get("explanation", "")
+                            if "LLM call failed" in explanation or not classification or classification == "Unknown":
+                                log_entry["method"]          = "LLM_Error"
+                                log_entry["llm_explanation"] = explanation or llm_result.get("raw_response", "")
+                                log_entry["details"]        += " | LLM failed — see llm_explanation"
+                            elif "429" in explanation or "RESOURCE_EXHAUSTED" in explanation:
+                                _rl_record_429(explanation)
+                                log_entry["method"]  = "Heuristic"
+                                log_entry["details"] += " | LLM rate-limited, backoff set"
+                            else:
+                                log_entry["verdict"]         = classification
+                                log_entry["method"]          = "LLM"
+                                log_entry["confidence"]      = llm_result.get("confidence", "Low")
+                                log_entry["llm_class"]       = classification
+                                log_entry["llm_explanation"] = explanation
+                                indicators = llm_result.get("attack_indicators", [])
+                                log_entry["details"] = "; ".join(indicators) if indicators else triage["details"]
+                                st.session_state.llm_count += 1
+                        except Exception as exc:
                             log_entry["method"]          = "LLM_Error"
-                            log_entry["llm_explanation"] = explanation or llm_result.get("raw_response", "")
-                            log_entry["details"]        += " | LLM failed — see llm_explanation"
-                        else:
-                            log_entry["verdict"]         = classification
-                            log_entry["method"]          = "LLM"
-                            log_entry["confidence"]      = llm_result.get("confidence", "Low")
-                            log_entry["llm_class"]       = classification
-                            log_entry["llm_explanation"] = explanation
-                            indicators = llm_result.get("attack_indicators", [])
-                            log_entry["details"] = "; ".join(indicators) if indicators else triage["details"]
-                            st.session_state.llm_count += 1
-                    except Exception as exc:
-                        log_entry["method"]          = "LLM_Error"
-                        log_entry["llm_explanation"] = str(exc)
-                        log_entry["details"]        += f" | LLM exception: {type(exc).__name__}"
+                            log_entry["llm_explanation"] = str(exc)
+                            log_entry["details"]        += f" | LLM exception: {type(exc).__name__}"
 
             # Update counters
             if "normal" in log_entry["verdict"].lower():

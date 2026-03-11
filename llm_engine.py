@@ -12,18 +12,11 @@ import os
 import json
 import re
 import time
-import threading
 
-# ── Rate-limit state ──────────────────────────────────────────────────────────
-# Free-tier limits: 15 RPM / 1500 RPD for gemini-2.0-flash
-# We enforce 1 call per 8 s (~7.5 RPM) with a thread lock so concurrent
-# Streamlit threads can't both slip through at the same instant.
-_rate_lock:      threading.Lock = threading.Lock()
-_last_call_time: float = 0.0
-_backoff_until:  float = 0.0
-_MIN_INTERVAL:   float = 8.0   # seconds between LLM calls (~7.5 RPM max)
+# ── Singleton LCEL chain ──────────────────────────────────────────────────────────────────
+_lcel_chain = None
 
-# ── Few-shot examples (Design Document §1.3 — few-shot prompting) ────────────
+
 FEW_SHOT_EXAMPLES = """\
 Example 1:
 Flow: proto=TCP, src=10.0.0.5:4321 → dst=192.168.1.1:22, dur=0.05s,
@@ -159,22 +152,6 @@ def analyze_flow_with_llm(flow: dict) -> dict:
     """
     flow_text = flow_to_text(flow)
 
-    # ── Acquire shared rate-limit slot (used by Forensic Console too) ─────────
-    remaining_backoff = acquire_call_slot()
-    if remaining_backoff is not None:
-        return {
-            'classification':    'Rate Limited',
-            'confidence':        'Low',
-            'attack_indicators': [],
-            'explanation':       (
-                f"API rate limit active — retry in {remaining_backoff:.0f}s. "
-                "15 requests/minute limit shared across Live Dashboard and Forensic Console."
-            ),
-            'mitigation':        ['Wait for backoff to expire, then retry.'],
-            'flow_text':         flow_text,
-            'raw_response':      'skipped (rate limited)',
-        }
-
     chain = _get_chain()
     raw = ""
 
@@ -211,11 +188,9 @@ def analyze_flow_with_llm(flow: dict) -> dict:
         err = str(e)
         # Detect 429 — set backoff window so subsequent calls skip the API
         if '429' in err or 'RESOURCE_EXHAUSTED' in err:
-            retry_delay = record_429(err)
             explanation = (
-                f"API rate limit hit (429 — 15 requests/minute exceeded). "
-                f"Backoff for {retry_delay:.0f}s. "
-                "Wait for the backoff to expire, then retry."
+                f"API rate limit hit (429). "
+                "Caller should set backoff via _rl_record_429."
             )
         else:
             explanation = f"LLM call failed: {err}"
@@ -235,37 +210,3 @@ def _regex_field(text: str, field: str) -> str | None:
     pattern = rf'"{field}"\s*:\s*"([^"]+)"'
     match = re.search(pattern, text, re.IGNORECASE)
     return match.group(1) if match else None
-
-
-# ── Shared rate-limit helpers (used by both Live Dashboard and Forensic Console) ──
-def acquire_call_slot() -> float | None:
-    """
-    Atomically acquire a rate-limited API call slot.
-    Returns remaining backoff seconds if still in a 429 window (caller must abort).
-    Returns None if slot was successfully acquired (after any needed sleep).
-    """
-    global _last_call_time, _backoff_until
-    with _rate_lock:
-        now = time.time()
-        remaining = _backoff_until - now
-        if remaining > 0:
-            return remaining
-        sleep_needed = max(0.0, _MIN_INTERVAL - (now - _last_call_time))
-        _last_call_time = now + sleep_needed
-    if sleep_needed > 0:
-        time.sleep(sleep_needed)
-    return None
-
-
-def record_429(err_str: str) -> float:
-    """
-    Parse a 429 error string, set the shared backoff window, return retry_delay.
-    """
-    global _backoff_until
-    retry_delay = 90.0
-    m = re.search(r'retry[^0-9]+([0-9]+)', err_str, re.IGNORECASE)
-    if m:
-        retry_delay = max(90.0, float(m.group(1)) + 10)
-    with _rate_lock:
-        _backoff_until = time.time() + retry_delay
-    return retry_delay
