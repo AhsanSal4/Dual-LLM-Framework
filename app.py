@@ -341,15 +341,14 @@ with tab1:
         st.info("🔴 Capture stopped — press ▶ Start Capture to begin monitoring.", icon="ℹ️")
 
     # LLM quota / backoff status
-    if MODULES_LOADED:
-        import time as _time
-        remaining = le._backoff_until - _time.time()
-        if remaining > 0:
-            st.warning(
-                f"⏳ **API rate-limit backoff** — LLM calls paused for **{remaining:.0f}s** more. "
-                "Free-tier quota exhausted. Heuristic detections continue unaffected.",
-                icon="🔴",
-            )
+    import time as _time
+    remaining = st.session_state["_rl_backoff_until"] - _time.time()
+    if remaining > 0:
+        st.warning(
+            f"⏳ **API rate-limit backoff** — LLM calls paused for **{remaining:.0f}s** more. "
+            "Free-tier quota exhausted. Heuristic detections continue unaffected.",
+            icon="🔴",
+        )
 
     # ── Drain flow queue and run triage pipeline ──────────────────────────────
     if st.session_state.capture_active:
