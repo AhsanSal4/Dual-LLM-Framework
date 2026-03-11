@@ -12,6 +12,7 @@ import os
 import json
 import re
 import time
+import threading
 
 from langchain_google_genai import ChatGoogleGenerativeAI
 from langchain_core.prompts import ChatPromptTemplate
@@ -19,10 +20,12 @@ from langchain_core.output_parsers import StrOutputParser
 
 # ── Rate-limit state ──────────────────────────────────────────────────────────
 # Free-tier limits: 15 RPM / 1500 RPD for gemini-2.0-flash
-# We enforce 1 call per 5 s (12 RPM) and fast-fail during a 429 backoff window.
+# We enforce 1 call per 8 s (~7.5 RPM) with a thread lock so concurrent
+# Streamlit threads can't both slip through at the same instant.
+_rate_lock:      threading.Lock = threading.Lock()
 _last_call_time: float = 0.0
 _backoff_until:  float = 0.0
-_MIN_INTERVAL:   float = 5.0   # seconds between LLM calls (12 RPM max)
+_MIN_INTERVAL:   float = 8.0   # seconds between LLM calls (~7.5 RPM max)
 
 # ── Few-shot examples (Design Document §1.3 — few-shot prompting) ────────────
 FEW_SHOT_EXAMPLES = """\
@@ -158,32 +161,38 @@ def analyze_flow_with_llm(flow: dict) -> dict:
 
     flow_text = flow_to_text(flow)
 
-    # ── Fast-fail if still in a 429 backoff window ────────────────────────────
-    remaining_backoff = _backoff_until - time.time()
-    if remaining_backoff > 0:
-        return {
-            'classification':    'Rate Limited',
-            'confidence':        'Low',
-            'attack_indicators': [],
-            'explanation':       (
-                f"API rate limit active — retry in {remaining_backoff:.0f}s. "
-                "Free-tier quota may be exhausted for today."
-            ),
-            'mitigation':        ['Wait for quota reset or upgrade to a paid API tier.'],
-            'flow_text':         flow_text,
-            'raw_response':      'skipped (rate limited)',
-        }
+    # ── Atomically check backoff and reserve a call slot ─────────────────────
+    with _rate_lock:
+        now = time.time()
+        # Fast-fail if still in a 429 backoff window
+        remaining_backoff = _backoff_until - now
+        if remaining_backoff > 0:
+            return {
+                'classification':    'Rate Limited',
+                'confidence':        'Low',
+                'attack_indicators': [],
+                'explanation':       (
+                    f"API rate limit active — retry in {remaining_backoff:.0f}s. "
+                    "Free-tier quota may be exhausted for today."
+                ),
+                'mitigation':        ['Wait for quota reset or upgrade to a paid API tier.'],
+                'flow_text':         flow_text,
+                'raw_response':      'skipped (rate limited)',
+            }
+        # Enforce minimum interval — calculate how long to sleep
+        elapsed = now - _last_call_time
+        sleep_needed = max(0.0, _MIN_INTERVAL - elapsed)
+        # Reserve the slot immediately so concurrent threads see it
+        _last_call_time = now + sleep_needed
 
-    # ── Enforce minimum interval between calls ────────────────────────────────
-    elapsed = time.time() - _last_call_time
-    if elapsed < _MIN_INTERVAL:
-        time.sleep(_MIN_INTERVAL - elapsed)
+    # Sleep outside the lock so other threads aren't blocked during the wait
+    if sleep_needed > 0:
+        time.sleep(sleep_needed)
 
     chain = _get_chain()
     raw = ""
 
     try:
-        _last_call_time = time.time()
         raw = chain.invoke({
             "few_shot_examples": FEW_SHOT_EXAMPLES,
             "flow_description":  flow_text,
@@ -216,13 +225,14 @@ def analyze_flow_with_llm(flow: dict) -> dict:
         err = str(e)
         # Detect 429 — set backoff window so subsequent calls skip the API
         if '429' in err or 'RESOURCE_EXHAUSTED' in err:
-            retry_delay = 65.0
+            retry_delay = 90.0
             # Try to parse the retry delay from the error message
             import re as _re
             m = _re.search(r'retry[^0-9]+([0-9]+)', err, _re.IGNORECASE)
             if m:
-                retry_delay = float(m.group(1)) + 5
-            _backoff_until = time.time() + retry_delay
+                retry_delay = max(90.0, float(m.group(1)) + 10)
+            with _rate_lock:
+                _backoff_until = time.time() + retry_delay
             explanation = (
                 f"API quota exceeded (429). "
                 f"Backoff for {retry_delay:.0f}s. "
