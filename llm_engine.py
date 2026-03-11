@@ -157,37 +157,23 @@ def analyze_flow_with_llm(flow: dict) -> dict:
         classification, confidence, attack_indicators,
         explanation, mitigation, flow_text, raw_response
     """
-    global _last_call_time, _backoff_until
-
     flow_text = flow_to_text(flow)
 
-    # ── Atomically check backoff and reserve a call slot ─────────────────────
-    with _rate_lock:
-        now = time.time()
-        # Fast-fail if still in a 429 backoff window
-        remaining_backoff = _backoff_until - now
-        if remaining_backoff > 0:
-            return {
-                'classification':    'Rate Limited',
-                'confidence':        'Low',
-                'attack_indicators': [],
-                'explanation':       (
-                    f"API rate limit active — retry in {remaining_backoff:.0f}s. "
-                    "Free-tier quota may be exhausted for today."
-                ),
-                'mitigation':        ['Wait for quota reset or upgrade to a paid API tier.'],
-                'flow_text':         flow_text,
-                'raw_response':      'skipped (rate limited)',
-            }
-        # Enforce minimum interval — calculate how long to sleep
-        elapsed = now - _last_call_time
-        sleep_needed = max(0.0, _MIN_INTERVAL - elapsed)
-        # Reserve the slot immediately so concurrent threads see it
-        _last_call_time = now + sleep_needed
-
-    # Sleep outside the lock so other threads aren't blocked during the wait
-    if sleep_needed > 0:
-        time.sleep(sleep_needed)
+    # ── Acquire shared rate-limit slot (used by Forensic Console too) ─────────
+    remaining_backoff = acquire_call_slot()
+    if remaining_backoff is not None:
+        return {
+            'classification':    'Rate Limited',
+            'confidence':        'Low',
+            'attack_indicators': [],
+            'explanation':       (
+                f"API rate limit active — retry in {remaining_backoff:.0f}s. "
+                "15 requests/minute limit shared across Live Dashboard and Forensic Console."
+            ),
+            'mitigation':        ['Wait for backoff to expire, then retry.'],
+            'flow_text':         flow_text,
+            'raw_response':      'skipped (rate limited)',
+        }
 
     chain = _get_chain()
     raw = ""
@@ -225,18 +211,11 @@ def analyze_flow_with_llm(flow: dict) -> dict:
         err = str(e)
         # Detect 429 — set backoff window so subsequent calls skip the API
         if '429' in err or 'RESOURCE_EXHAUSTED' in err:
-            retry_delay = 90.0
-            # Try to parse the retry delay from the error message
-            import re as _re
-            m = _re.search(r'retry[^0-9]+([0-9]+)', err, _re.IGNORECASE)
-            if m:
-                retry_delay = max(90.0, float(m.group(1)) + 10)
-            with _rate_lock:
-                _backoff_until = time.time() + retry_delay
+            retry_delay = record_429(err)
             explanation = (
-                f"API quota exceeded (429). "
+                f"API rate limit hit (429 — 15 requests/minute exceeded). "
                 f"Backoff for {retry_delay:.0f}s. "
-                "Free-tier daily limit may be exhausted — check https://ai.dev/rate-limit."
+                "Wait for the backoff to expire, then retry."
             )
         else:
             explanation = f"LLM call failed: {err}"
@@ -256,3 +235,37 @@ def _regex_field(text: str, field: str) -> str | None:
     pattern = rf'"{field}"\s*:\s*"([^"]+)"'
     match = re.search(pattern, text, re.IGNORECASE)
     return match.group(1) if match else None
+
+
+# ── Shared rate-limit helpers (used by both Live Dashboard and Forensic Console) ──
+def acquire_call_slot() -> float | None:
+    """
+    Atomically acquire a rate-limited API call slot.
+    Returns remaining backoff seconds if still in a 429 window (caller must abort).
+    Returns None if slot was successfully acquired (after any needed sleep).
+    """
+    global _last_call_time, _backoff_until
+    with _rate_lock:
+        now = time.time()
+        remaining = _backoff_until - now
+        if remaining > 0:
+            return remaining
+        sleep_needed = max(0.0, _MIN_INTERVAL - (now - _last_call_time))
+        _last_call_time = now + sleep_needed
+    if sleep_needed > 0:
+        time.sleep(sleep_needed)
+    return None
+
+
+def record_429(err_str: str) -> float:
+    """
+    Parse a 429 error string, set the shared backoff window, return retry_delay.
+    """
+    global _backoff_until
+    retry_delay = 90.0
+    m = re.search(r'retry[^0-9]+([0-9]+)', err_str, re.IGNORECASE)
+    if m:
+        retry_delay = max(90.0, float(m.group(1)) + 10)
+    with _rate_lock:
+        _backoff_until = time.time() + retry_delay
+    return retry_delay

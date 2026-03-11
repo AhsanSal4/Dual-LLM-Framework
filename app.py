@@ -176,8 +176,21 @@ relationships observed across the retrieved records.
 def _run_forensic_query(retriever, llm, prompt, question: str) -> dict:
     """
     Execute a forensic RAG query using LCEL.
+    Shares the same rate-limit state as the Live Dashboard via llm_engine.
     Returns {"result": str, "source_documents": list, "error": str|None}
     """
+    # Check / acquire shared rate-limit slot before touching the API
+    backoff_remaining = le.acquire_call_slot()
+    if backoff_remaining is not None:
+        friendly = (
+            f"\u26a0\ufe0f **API rate limit active — {backoff_remaining:.0f}s remaining.**\n\n"
+            "The Gemini free tier allows **15 requests/minute**. "
+            "Both the Live Dashboard and Forensic Console share this limit.\n\n"
+            f"**Retry in {backoff_remaining:.0f}s**, or stop the Live Dashboard capture "
+            "to free up capacity for forensic queries."
+        )
+        return {"result": friendly, "source_documents": [], "error": "rate_limited"}
+
     source_docs = retriever.invoke(question)
     context = "\n\n---\n\n".join([d.page_content for d in source_docs])
     chain = prompt | llm | StrOutputParser()
@@ -187,15 +200,12 @@ def _run_forensic_query(retriever, llm, prompt, question: str) -> dict:
     except Exception as exc:
         err = str(exc)
         if "429" in err or "RESOURCE_EXHAUSTED" in err:
-            import re as _re
-            m = _re.search(r'retry[^0-9]+([0-9]+)', err, _re.IGNORECASE)
-            wait = int(m.group(1)) + 5 if m else 65
+            wait = le.record_429(err)
             friendly = (
-                f"\u26a0\ufe0f **API quota exhausted (429).**\n\n"
-                f"The Gemini free tier has a limit of **1,500 requests/day** shared across "
-                f"the Live Dashboard and Forensic Console. Today\u2019s quota is used up.\n\n"
-                f"**Retry in {wait}s**, or wait until midnight (Pacific time) for the daily "
-                f"reset. Alternatively, enable billing on your Google AI project for higher limits."
+                f"\u26a0\ufe0f **API rate limit hit (429).**\n\n"
+                f"The Gemini free tier allows **15 requests/minute**. "
+                f"Both the Live Dashboard and Forensic Console share this quota.\n\n"
+                f"**Retry in {wait:.0f}s**, or wait until the backoff expires."
             )
         else:
             friendly = f"LLM error: {err}"
