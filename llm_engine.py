@@ -14,10 +14,6 @@ import re
 import time
 import threading
 
-from langchain_google_genai import ChatGoogleGenerativeAI
-from langchain_core.prompts import ChatPromptTemplate
-from langchain_core.output_parsers import StrOutputParser
-
 # ── Rate-limit state ──────────────────────────────────────────────────────────
 # Free-tier limits: 15 RPM / 1500 RPD for gemini-2.0-flash
 # We enforce 1 call per 8 s (~7.5 RPM) with a thread lock so concurrent
@@ -99,6 +95,10 @@ def _get_chain():
     global _lcel_chain
     if _lcel_chain is not None:
         return _lcel_chain
+
+    from langchain_google_genai import ChatGoogleGenerativeAI
+    from langchain_core.prompts import ChatPromptTemplate
+    from langchain_core.output_parsers import StrOutputParser
 
     api_key = os.environ.get("GOOGLE_API_KEY", "")
     if not api_key:
