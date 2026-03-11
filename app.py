@@ -103,22 +103,23 @@ for _k, _v in _defaults.items():
     if _k not in st.session_state:
         st.session_state[_k] = _v
 
-_RL_MIN_INTERVAL = 8.0   # seconds between calls (~7.5 RPM, 50% under 15 RPM limit)
+_RL_MIN_INTERVAL = 10.0   # minimum seconds between API calls (~6 RPM, well under 15 RPM)
 
 
 def _rl_acquire() -> float | None:
-    """Try to acquire an LLM call slot using session-state rate tracking.
-    Returns remaining backoff seconds if blocked, None if slot acquired."""
+    """Try to acquire an LLM call slot.  NEVER sleeps.
+    Returns seconds-to-wait (>0) if blocked — caller must SKIP the call.
+    Returns None if slot is acquired and caller may proceed."""
     import time as _time
     now = _time.time()
     remaining = st.session_state["_rl_backoff_until"] - now
     if remaining > 0:
-        return remaining
+        return remaining          # still in 429 backoff window
     since_last = now - st.session_state["_rl_last_call"]
     if since_last < _RL_MIN_INTERVAL:
-        _time.sleep(_RL_MIN_INTERVAL - since_last)
-    st.session_state["_rl_last_call"] = _time.time()
-    return None
+        return _RL_MIN_INTERVAL - since_last   # too soon — caller skips
+    st.session_state["_rl_last_call"] = now
+    return None                   # slot acquired
 
 
 def _rl_record_429(err_str: str) -> float:
@@ -353,6 +354,7 @@ with tab1:
     # ── Drain flow queue and run triage pipeline ──────────────────────────────
     if st.session_state.capture_active:
         new_flows = pc.get_flows(max_items=25)
+        llm_calls_this_batch = 0   # hard limit: 1 LLM call per refresh cycle
         for flow in new_flows:
             st.session_state.total_flows += 1
 
@@ -389,15 +391,19 @@ with tab1:
             cap = st.session_state.llm_session_cap
             if triage["method"] == "LLM_Required" and st.session_state.llm_enabled:
                 if st.session_state.llm_count >= cap:
-                    # Cap reached — keep heuristic verdict, note reason
                     log_entry["method"]  = "Heuristic"
                     log_entry["details"] += f" | LLM skipped (session cap {cap} reached)"
+                elif llm_calls_this_batch >= 1:
+                    # Only 1 LLM call per refresh cycle — queue the rest for next cycle
+                    log_entry["method"]  = "Heuristic"
+                    log_entry["details"] += " | LLM deferred to next cycle (batch cap)"
                 else:
-                    backoff_rem = _rl_acquire()
-                    if backoff_rem is not None:
+                    wait = _rl_acquire()
+                    if wait is not None:
                         log_entry["method"]  = "Heuristic"
-                        log_entry["details"] += f" | LLM skipped (rate limit backoff {backoff_rem:.0f}s)"
+                        log_entry["details"] += f" | LLM skipped (rate limit, retry in {wait:.0f}s)"
                     else:
+                        llm_calls_this_batch += 1
                         flow["heuristic_details"] = triage["details"]
                         try:
                             llm_result = le.analyze_flow_with_llm(flow)
