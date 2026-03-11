@@ -86,7 +86,7 @@ _defaults = {
     "system_logs":    [],
     "capture_active": False,
     "use_simulation": True,
-    "llm_enabled":    True,
+    "llm_enabled":    False,
     "total_flows":    0,
     "attack_count":   0,
     "normal_count":   0,
@@ -103,7 +103,7 @@ for _k, _v in _defaults.items():
     if _k not in st.session_state:
         st.session_state[_k] = _v
 
-_RL_MIN_INTERVAL = 10.0   # minimum seconds between API calls (~6 RPM, well under 15 RPM)
+_RL_MIN_INTERVAL = 20.0   # minimum seconds between API calls (~3 RPM, well under 30 RPM)
 
 
 def _rl_acquire() -> float | None:
