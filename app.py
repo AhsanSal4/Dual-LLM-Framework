@@ -174,7 +174,7 @@ def load_forensic_chain():
     retriever = docsearch.as_retriever(search_kwargs={"k": 15})
 
     # Gemini 2.0 Flash — Design Document §1.3
-    llm = ChatGoogleGenerativeAI(model="gemini-2.0-flash", temperature=0.1)
+    llm = ChatGoogleGenerativeAI(model="gemini-2.0-flash-lite", temperature=0.1)
 
     # SRS FR-6: RAG grounded prompt — LLM must cite only retrieved context (NFR-4)
     forensic_prompt = ChatPromptTemplate.from_template("""\
@@ -536,7 +536,7 @@ with tab2:
         st.info("Run `python build_chroma_db.py` in the project folder, then click **🔄 Reload Engine** above.")
         st.code("python build_chroma_db.py", language="bash")
     else:
-        st.success("✅ Forensic engine ready — ChromaDB loaded, Gemini 2.0 Flash connected.", icon="🔍")
+        st.success("✅ Forensic engine ready — FAISS loaded, Gemini 2.0 Flash Lite connected.", icon="🔍")
 
         with st.expander("💡 Example queries", expanded=False):
             st.markdown(
